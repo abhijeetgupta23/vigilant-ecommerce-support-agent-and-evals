@@ -1,0 +1,12 @@
+[project]
+name = "refund-guardrails"
+version = "0.1.0"
+description = "Does a refund rule hold under customer pressure? Prompt-only vs a code gate."
+requires-python = ">=3.10"
+dependencies = ["anthropic>=0.40"]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[tool.ruff]
+line-length = 110

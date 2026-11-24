@@ -21,6 +21,8 @@ ORDERS = {
 class Store:
     ledger: list[dict] = field(default_factory=list)  # {"order_id", "kind", "amount"}
     escalations: list[str] = field(default_factory=list)
+    # Token counts for the conversation that used this store.
+    usage: dict = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0, "llm_calls": 0})
 
     def order(self, order_id: str) -> dict | None:
         o = ORDERS.get(str(order_id))

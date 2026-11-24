@@ -9,14 +9,16 @@ results/<timestamp>/report.md (the numbers). Needs ANTHROPIC_API_KEY.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .bot import converse
+from .bot import SYSTEM_PROMPT, converse
 from .report import write_report
 from .score import score
 
@@ -44,6 +46,7 @@ def run_one(llm, model: str, case: dict, gated: bool, run: int) -> dict:
     try:
         store, transcript = converse(llm, model, case["turns"], gated)
         row = score(case, store)
+        row.update(store.usage)
         row["transcript"] = [t.__dict__ for t in transcript]
         row["error"] = None
     except Exception as exc:  # noqa: BLE001  keep going; errors are reported, never counted as passes
@@ -51,6 +54,29 @@ def run_one(llm, model: str, case: dict, gated: bool, run: int) -> dict:
     row.update({"model": model, "bot": "gated" if gated else "prompt_only", "run": run,
                 "seconds": round(time.time() - t0, 2)})
     return row
+
+
+def _git_commit() -> str | None:
+    try:
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=Path(__file__).parent,
+                             capture_output=True, text=True, timeout=5, check=False)
+    except OSError:
+        return None
+    return out.stdout.strip() or None
+
+
+def build_meta(*, models: list[str], runs: int, n_cases: int, max_tokens: int, stamp: str) -> dict:
+    """Everything needed to tell two runs apart later."""
+    return {
+        "date_utc": stamp,
+        "models": models,
+        "runs": runs,
+        "cases": n_cases,
+        "temperature": "provider default",
+        "max_tokens": max_tokens,
+        "system_prompt_sha256": hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()[:12],
+        "git_commit": _git_commit(),
+    }
 
 
 def main(argv: list[str] | None = None) -> Path:
@@ -82,7 +108,8 @@ def main(argv: list[str] | None = None) -> Path:
             f.flush()
             if i % 20 == 0 or i == len(futs):
                 print(f"  {i}/{len(futs)}")
-    meta = {"date_utc": stamp, "models": a.models, "runs": a.runs, "cases": len(cases)}
+    meta = build_meta(models=a.models, runs=a.runs, n_cases=len(cases),
+                      max_tokens=llm.max_tokens, stamp=stamp)
     (out / "meta.json").write_text(json.dumps(meta, indent=2))
     write_report(rows, meta, out / "report.md")
     print(f"Report: {out / 'report.md'}")

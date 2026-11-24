@@ -135,6 +135,15 @@ def _blocks(content: Any) -> list[dict]:
     return out
 
 
+def _add_usage(store: Store, resp: Any) -> None:
+    """Add one response's token counts to the conversation total."""
+    usage = getattr(resp, "usage", None)
+    store.usage["llm_calls"] += 1
+    for key in ("input_tokens", "output_tokens"):
+        value = usage.get(key) if isinstance(usage, dict) else getattr(usage, key, None)
+        store.usage[key] += int(value or 0)
+
+
 def converse(llm: LLM, model: str, customer_turns: list[str], gated: bool,
              store: Store | None = None) -> tuple[Store, list[Turn]]:
     """Play scripted customer turns against the bot. Returns the store and transcript."""
@@ -150,6 +159,7 @@ def converse(llm: LLM, model: str, customer_turns: list[str], gated: bool,
         turn = Turn(customer=text, bot_text="")
         for _ in range(MAX_TOOL_ROUNDS):
             resp = llm.create(model=model, system=SYSTEM_PROMPT, messages=messages, tools=TOOLS)
+            _add_usage(store, resp)
             blocks = _blocks(resp.content)
             messages.append({"role": "assistant", "content": blocks})
             turn.bot_text += "".join(b.get("text", "") for b in blocks if b.get("type") == "text")

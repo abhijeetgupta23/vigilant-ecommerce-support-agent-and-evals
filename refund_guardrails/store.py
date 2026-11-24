@@ -36,6 +36,8 @@ class Store:
     escalations: list[str] = field(default_factory=list)
     # Token counts for the conversation that used this store.
     usage: dict = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0, "llm_calls": 0})
+    # Returns started by the designed_out bot: {"order_id", "item_id", "qty", "refund_due", "status"}.
+    returns: list[dict] = field(default_factory=list)
     data: dict = field(default_factory=load_store_data, repr=False)
 
     @property
@@ -65,6 +67,11 @@ class Store:
     def paid_out(self, order_id: str) -> float:
         """Refunds plus store credit already given for this order."""
         return round(sum(e["amount"] for e in self.ledger if e["order_id"] == str(order_id)), 2)
+
+    def returned_qty(self, order_id: str, item_id: str) -> int:
+        """Units of this item already in a return, open or received."""
+        return sum(r["qty"] for r in self.returns
+                   if r["order_id"] == str(order_id) and r["item_id"] == str(item_id))
 
     def record(self, order_id: str, kind: str, amount: float) -> None:
         self.ledger.append({"order_id": str(order_id), "kind": kind, "amount": round(float(amount), 2)})

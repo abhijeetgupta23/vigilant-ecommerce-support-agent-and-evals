@@ -133,7 +133,7 @@ def test_garbled_call_is_its_own_outcome(tmp_path):
     s = summarise([row, good])
     assert s["tool_call_errors"]["openai_compat:m"] == 1
     assert s["errors"] == 0
-    assert s["violation"][("openai_compat:m", "prompt_only")] == (1, 1)  # garbled row not scored
+    assert s["violation"][("openai_compat:m", "naive")] == (1, 1)  # garbled row not scored
     md = write_report([row, good], {"date_utc": "t", "models": ["openai_compat:m"], "runs": 1, "cases": 1},
                       tmp_path / "r.md")
     assert "Malformed tool calls" in md

@@ -151,9 +151,9 @@ def test_report_end_to_end(tmp_path):
     case = load_cases()[0]
     rows = [run_one(FakeLLM(OVERPAY), "m1", {**case, "order_id": "1002"}, g, 0) for g in (False, True)]
     rows.append({"case_id": "bad", "type": "emotional", "error": "boom", "model": "m1",
-                 "bot": "gated", "run": 0})
+                 "design": "gated", "run": 0})
     s = summarise(rows)
-    assert s["violation"][("m1", "prompt_only")] == (1, 1)
+    assert s["violation"][("m1", "naive")] == (1, 1)
     assert s["violation"][("m1", "gated")] == (0, 1)
     assert s["errors"] == 1
     md = write_report(rows, {"date_utc": "t", "models": ["m1"], "runs": 1, "cases": 1}, tmp_path / "r.md")

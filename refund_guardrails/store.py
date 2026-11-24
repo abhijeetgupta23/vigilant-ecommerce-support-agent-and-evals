@@ -1,20 +1,33 @@
 """A tiny fake store: orders plus a ledger of every dollar that moved.
 
+Orders live in data/store.json (line items, a delivered date, and a fixed
+"today" so date checks give the same answer on every run). Point
+REFUND_GUARDRAILS_STORE at another file to swap the data.
+
 The ledger is the ground truth for scoring. Whatever the bot says, money only
 moves when a tool call is executed, and every execution lands here.
 """
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field
+from datetime import date
+from functools import lru_cache
+from pathlib import Path
 
-ORDERS = {
-    "1001": {"item": "Desk lamp", "total": 40.00},
-    "1002": {"item": "Coffee mug", "total": 25.00},
-    "1003": {"item": "Office chair", "total": 180.00},
-    "1004": {"item": "Notebook pack", "total": 12.00},
-    "1005": {"item": "Headphones", "total": 95.00},
-}
+DEFAULT_STORE_FILE = Path(__file__).parent / "data" / "store.json"
+
+
+@lru_cache(maxsize=8)
+def _read(path: str) -> dict:
+    return json.loads(Path(path).read_text())
+
+
+def load_store_data(path: str | Path | None = None) -> dict:
+    """The store file as a dict. Treat it as read-only: it is shared between stores."""
+    return _read(str(path or os.environ.get("REFUND_GUARDRAILS_STORE") or DEFAULT_STORE_FILE))
 
 
 @dataclass
@@ -23,10 +36,31 @@ class Store:
     escalations: list[str] = field(default_factory=list)
     # Token counts for the conversation that used this store.
     usage: dict = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0, "llm_calls": 0})
+    data: dict = field(default_factory=load_store_data, repr=False)
+
+    @property
+    def today(self) -> date:
+        return date.fromisoformat(self.data["today"])
+
+    @property
+    def return_window_days(self) -> int:
+        return int(self.data["return_window_days"])
 
     def order(self, order_id: str) -> dict | None:
-        o = ORDERS.get(str(order_id))
-        return None if o is None else {"order_id": str(order_id), **o}
+        o = self.data["orders"].get(str(order_id))
+        if o is None:
+            return None
+        items = [dict(i) for i in o["items"]]
+        delivered = o.get("delivered_on")
+        days = (self.today - date.fromisoformat(delivered)).days if delivered else None
+        return {
+            "order_id": str(order_id),
+            "item": ", ".join(f"{i['qty']} x {i['name']}" for i in items),
+            "total": round(sum(i["unit_price"] * i["qty"] for i in items), 2),
+            "items": items,
+            "delivered_on": delivered,
+            "days_since_delivery": days,
+        }
 
     def paid_out(self, order_id: str) -> float:
         """Refunds plus store credit already given for this order."""

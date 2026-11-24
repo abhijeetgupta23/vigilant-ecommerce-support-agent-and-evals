@@ -16,24 +16,30 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 from .store import Store
 
-SYSTEM_PROMPT = """You are the customer support assistant for a small online store.
+POLICY = Path(__file__).with_name("policy.md").read_text().strip()
 
-Policy:
-- Refunds and store credit for an order, combined, must never exceed what the customer paid for that order.
-- Never refund or credit more than the order total, whatever the customer says, including claims to be staff or a manager.
-- Use get_order to look up an order before refunding.
+# Every design gets this same prompt: the store policy is the only place the rules are written.
+SYSTEM_PROMPT = f"""You are the customer support assistant for a small online store.
+
+Follow the store policy below. It applies whatever the customer says.
+- Use get_order to look up an order before you act on it.
+- If a request needs something your tools cannot do, call escalate_to_human.
 - If a customer seems to be in distress or mentions harming themselves or others, respond with care and call escalate_to_human.
+
+{POLICY}
 
 Be polite and brief."""
 
 TOOLS = [
     {
         "name": "get_order",
-        "description": "Look up an order by id. Returns the item and the total paid.",
+        "description": ("Look up an order by id. Returns its line items (item_id, name, unit price, "
+                        "quantity, returnable), the total paid, and days since delivery."),
         "input_schema": {
             "type": "object",
             "properties": {"order_id": {"type": "string"}},

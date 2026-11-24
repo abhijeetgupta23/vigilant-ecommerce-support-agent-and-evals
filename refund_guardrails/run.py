@@ -1,9 +1,10 @@
 """Run every case against both bot versions and every model, several times.
 
-    python -m refund_guardrails.run --models claude-haiku-5-5 claude-sonnet-5-5 --runs 3
+    python -m refund_guardrails.run --models anthropic:<id> openai_compat:<id> --runs 3
 
-Writes results/<timestamp>/conversations.jsonl (full transcripts) and
-results/<timestamp>/report.md (the numbers). Needs ANTHROPIC_API_KEY.
+A model is written as provider:model_id (see llm.py); a bare id means anthropic.
+Writes results/<timestamp>/conversations.jsonl (full transcripts),
+results/<timestamp>/report.md (the numbers) and meta.json (the settings).
 """
 
 from __future__ import annotations
@@ -11,7 +12,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .bot import SYSTEM_PROMPT, converse
+from .llm import DEFAULT_MAX_TOKENS, AnthropicLLM, ToolCallError, make_llm, parse_spec  # noqa: F401
 from .report import write_report
 from .score import score
 
@@ -29,19 +30,8 @@ def load_cases() -> list[dict]:
     return json.loads(CASES_FILE.read_text())
 
 
-class AnthropicLLM:
-    def __init__(self, max_tokens: int = 1024):
-        import anthropic  # imported here so offline tests don't need it
-
-        self.client = anthropic.Anthropic(max_retries=5)
-        self.max_tokens = max_tokens
-
-    def create(self, *, model, system, messages, tools):
-        return self.client.messages.create(model=model, system=system, messages=messages,
-                                           tools=tools, max_tokens=self.max_tokens)
-
-
-def run_one(llm, model: str, case: dict, gated: bool, run: int) -> dict:
+def run_one(llm, model: str, case: dict, gated: bool, run: int, label: str | None = None) -> dict:
+    """One conversation, scored. `model` goes to the API; `label` names it in the results."""
     t0 = time.time()
     try:
         store, transcript = converse(llm, model, case["turns"], gated)
@@ -49,9 +39,12 @@ def run_one(llm, model: str, case: dict, gated: bool, run: int) -> dict:
         row.update(store.usage)
         row["transcript"] = [t.__dict__ for t in transcript]
         row["error"] = None
+    except ToolCallError as exc:
+        # The model garbled a tool call. Its own outcome: not a pass, not a violation.
+        row = {"case_id": case["id"], "type": case["type"], "error": None, "tool_call_error": str(exc)}
     except Exception as exc:  # noqa: BLE001  keep going; errors are reported, never counted as passes
         row = {"case_id": case["id"], "type": case["type"], "error": f"{type(exc).__name__}: {exc}"}
-    row.update({"model": model, "bot": "gated" if gated else "prompt_only", "run": run,
+    row.update({"model": label or model, "bot": "gated" if gated else "prompt_only", "run": run,
                 "seconds": round(time.time() - t0, 2)})
     return row
 
@@ -70,6 +63,7 @@ def build_meta(*, models: list[str], runs: int, n_cases: int, max_tokens: int, s
     return {
         "date_utc": stamp,
         "models": models,
+        "providers": sorted({parse_spec(m)[0] for m in models}),
         "runs": runs,
         "cases": n_cases,
         "temperature": "provider default",
@@ -81,17 +75,17 @@ def build_meta(*, models: list[str], runs: int, n_cases: int, max_tokens: int, s
 
 def main(argv: list[str] | None = None) -> Path:
     p = argparse.ArgumentParser()
-    p.add_argument("--models", nargs="+", required=True)
+    p.add_argument("--models", nargs="+", required=True, help="provider:model_id, e.g. anthropic:<id>")
     p.add_argument("--runs", type=int, default=3)
     p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     p.add_argument("--only", nargs="*", help="case ids to run (default: all)")
     p.add_argument("--out", default="results")
     a = p.parse_args(argv)
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise SystemExit("Set ANTHROPIC_API_KEY first.")
     cases = [c for c in load_cases() if not a.only or c["id"] in a.only]
-    llm = AnthropicLLM()
+    specs = {m: parse_spec(m) for m in a.models}
+    llms = {prov: make_llm(prov, a.max_tokens) for prov in {prov for prov, _ in specs.values()}}
     jobs = [(m, c, g, r) for m in a.models for c in cases for g in (False, True) for r in range(a.runs)]
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -100,7 +94,7 @@ def main(argv: list[str] | None = None) -> Path:
     print(f"{len(jobs)} conversations -> {out}")
     rows = []
     with ThreadPoolExecutor(max_workers=a.workers) as ex, open(out / "conversations.jsonl", "w") as f:
-        futs = [ex.submit(run_one, llm, *j) for j in jobs]
+        futs = [ex.submit(run_one, llms[specs[m][0]], specs[m][1], c, g, r, label=m) for m, c, g, r in jobs]
         for i, fut in enumerate(as_completed(futs), 1):
             row = fut.result()
             rows.append(row)
@@ -108,8 +102,7 @@ def main(argv: list[str] | None = None) -> Path:
             f.flush()
             if i % 20 == 0 or i == len(futs):
                 print(f"  {i}/{len(futs)}")
-    meta = build_meta(models=a.models, runs=a.runs, n_cases=len(cases),
-                      max_tokens=llm.max_tokens, stamp=stamp)
+    meta = build_meta(models=a.models, runs=a.runs, n_cases=len(cases), max_tokens=a.max_tokens, stamp=stamp)
     (out / "meta.json").write_text(json.dumps(meta, indent=2))
     write_report(rows, meta, out / "report.md")
     print(f"Report: {out / 'report.md'}")

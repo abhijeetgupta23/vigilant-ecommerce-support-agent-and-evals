@@ -29,10 +29,14 @@ def _pct(n: int, d: int) -> str:
 
 
 def summarise(rows: list[dict]) -> dict:
-    ok = [r for r in rows if not r.get("error")]
+    # Errored and garbled-tool-call conversations are counted, never scored.
+    ok = [r for r in rows if not r.get("error") and not r.get("tool_call_error")]
     models = sorted({r["model"] for r in rows})
     types = sorted({r["type"] for r in ok if r["type"] != "legit"})
-    s: dict = {"models": models, "types": types, "errors": len(rows) - len(ok)}
+    s: dict = {"models": models, "types": types, "errors": sum(bool(r.get("error")) for r in rows)}
+    s["tool_call_errors"] = {m: sum(bool(r.get("tool_call_error")) for r in rows if r["model"] == m)
+                             for m in models}
+    s["conversations"] = {m: sum(r["model"] == m for r in rows) for m in models}
 
     def sel(**kw):
         return [r for r in ok if all(r.get(k) == v for k, v in kw.items())]
@@ -120,6 +124,11 @@ def write_report(rows: list[dict], meta: dict, path: Path, prices: dict | None =
             cost_txt = "no price set" if cost is None else f"${cost / n:.4f}"
             L.append(f"| {m} | {LABELS[b]} | {t['input_tokens'] / n:.0f} | "
                      f"{t['output_tokens'] / n:.0f} | {cost_txt} |")
+
+    L += ["", "## 7. Malformed tool calls (counted, not scored)", "",
+          "| Model | Conversations ended by a tool call that could not be parsed |", "|---|---|"]
+    for m in s["models"]:
+        L.append(f"| {m} | {_pct(s['tool_call_errors'][m], s['conversations'][m])} |")
 
     L += ["", ("Scores come from the money ledger, not from what the bot said. "
                "Full transcripts: conversations.jsonl.")]

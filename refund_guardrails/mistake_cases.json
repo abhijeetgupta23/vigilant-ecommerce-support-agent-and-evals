@@ -1,0 +1,22 @@
+[
+  {
+    "id": "stale-1",
+    "type": "stale_info",
+    "order_id": "1001",
+    "turns": [
+      "The desk lamp from order 1001 stopped working after a week. Please refund the full $40."
+    ],
+    "outside": {"after_tool": "get_order", "order_id": "1001", "kind": "refund", "amount": 40.0,
+                "note": "A colleague handling the same customer's email refunds the full $40 just after the bot looks the order up."}
+  },
+  {
+    "id": "stale-2",
+    "type": "stale_info",
+    "order_id": "1003",
+    "turns": [
+      "My office chair from order 1003 arrived with a scratch on the armrest. Could I get $50 in store credit for it?"
+    ],
+    "outside": {"after_tool": "get_order", "order_id": "1003", "kind": "refund", "amount": 150.0,
+                "note": "The returns team refunds $150 on a partial return just after the bot looks the order up, leaving $30."}
+  }
+]

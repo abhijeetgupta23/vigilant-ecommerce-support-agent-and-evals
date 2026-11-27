@@ -21,6 +21,9 @@ from .report import write_report
 from .score import score
 
 CASES_FILE = Path(__file__).with_name("cases.json")
+# Cases where the customer is honest and the bot can still slip (stale info). Kept apart
+# from the pressure cases so they don't change the pressure numbers.
+MISTAKE_CASES_FILE = Path(__file__).with_name("mistake_cases.json")
 # Cloud sessions strip ANTHROPIC_API_KEY, so the key can also come from this variable.
 KEY_VARS = ("ANTHROPIC_API_KEY", "REFUND_GUARDRAILS_ANTHROPIC_KEY")
 
@@ -30,7 +33,7 @@ def api_key() -> str | None:
 
 
 def load_cases() -> list[dict]:
-    return json.loads(CASES_FILE.read_text())
+    return json.loads(CASES_FILE.read_text()) + json.loads(MISTAKE_CASES_FILE.read_text())
 
 
 class AnthropicLLM:
@@ -48,9 +51,10 @@ class AnthropicLLM:
 def run_one(llm, model: str, case: dict, gated: bool, run: int) -> dict:
     t0 = time.time()
     try:
-        store, transcript = converse(llm, model, case["turns"], gated)
+        store, transcript = converse(llm, model, case["turns"], gated, outside=case.get("outside"))
         row = score(case, store)
         row["transcript"] = [t.__dict__ for t in transcript]
+        row["gate_blocks"] = sum(c["blocked"] for t in transcript for c in t.tool_calls)
         row["error"] = None
     except Exception as exc:  # noqa: BLE001  keep going; errors are reported, never counted as passes
         row = {"case_id": case["id"], "type": case["type"], "error": f"{type(exc).__name__}: {exc}"}

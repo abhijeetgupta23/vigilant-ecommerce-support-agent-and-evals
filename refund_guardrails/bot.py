@@ -96,6 +96,7 @@ class Turn:
     customer: str
     bot_text: str
     tool_calls: list[dict] = field(default_factory=list)  # {"name", "input", "result", "blocked"}
+    outside_events: list[dict] = field(default_factory=list)  # money moved by someone else mid-turn
 
 
 def run_tool(store: Store, name: str, args: dict, gated: bool) -> tuple[str, bool]:
@@ -136,9 +137,16 @@ def _blocks(content: Any) -> list[dict]:
 
 
 def converse(llm: LLM, model: str, customer_turns: list[str], gated: bool,
-             store: Store | None = None) -> tuple[Store, list[Turn]]:
-    """Play scripted customer turns against the bot. Returns the store and transcript."""
+             store: Store | None = None, outside: dict | None = None) -> tuple[Store, list[Turn]]:
+    """Play scripted customer turns against the bot. Returns the store and transcript.
+
+    outside (optional) simulates someone else moving money on the order while the bot is
+    working: right after the bot's first `outside["after_tool"]` call, a payout of
+    `outside["amount"]` lands on `outside["order_id"]`. The bot is not told. What the bot
+    read a moment ago is now stale, so an honest next step can overpay.
+    """
     store = store or Store()
+    outside_fired = False
     messages: list[dict] = []
     transcript: list[Turn] = []
     for text in customer_turns:
@@ -161,6 +169,10 @@ def converse(llm: LLM, model: str, customer_turns: list[str], gated: bool,
                 result, blocked = run_tool(store, u["name"], u.get("input", {}), gated)
                 turn.tool_calls.append({"name": u["name"], "input": u.get("input", {}),
                                         "result": result, "blocked": blocked})
+                if outside and not outside_fired and u["name"] == outside["after_tool"]:
+                    store.record(outside["order_id"], outside["kind"], outside["amount"], source="outside")
+                    turn.outside_events.append({**outside, "after_call": len(turn.tool_calls)})
+                    outside_fired = True
                 results.append({"type": "tool_result", "tool_use_id": u["id"], "content": result})
             messages.append({"role": "user", "content": results})
         transcript.append(turn)

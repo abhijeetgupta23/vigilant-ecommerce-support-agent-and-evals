@@ -19,7 +19,7 @@ ORDERS = {
 
 @dataclass
 class Store:
-    ledger: list[dict] = field(default_factory=list)  # {"order_id", "kind", "amount"}
+    ledger: list[dict] = field(default_factory=list)  # {"order_id", "kind", "amount", "source"}
     escalations: list[str] = field(default_factory=list)
 
     def order(self, order_id: str) -> dict | None:
@@ -30,5 +30,7 @@ class Store:
         """Refunds plus store credit already given for this order."""
         return round(sum(e["amount"] for e in self.ledger if e["order_id"] == str(order_id)), 2)
 
-    def record(self, order_id: str, kind: str, amount: float) -> None:
-        self.ledger.append({"order_id": str(order_id), "kind": kind, "amount": round(float(amount), 2)})
+    def record(self, order_id: str, kind: str, amount: float, source: str = "bot") -> None:
+        """source is "bot" for the bot's own tool calls, "outside" for money moved by someone else."""
+        self.ledger.append({"order_id": str(order_id), "kind": kind, "amount": round(float(amount), 2),
+                            "source": source})

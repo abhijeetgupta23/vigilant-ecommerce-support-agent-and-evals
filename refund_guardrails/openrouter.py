@@ -97,10 +97,13 @@ class OpenRouterLLM:
                 with urllib.request.urlopen(req, timeout=self.timeout) as r:  # honours HTTPS_PROXY
                     data = json.loads(r.read())
             except urllib.error.HTTPError as e:
+                detail = e.read()[:300]
+                if b"per-day" in detail or b"per day" in detail:  # daily free quota: retrying won't help
+                    raise RuntimeError(f"OpenRouter daily limit reached: {detail!r}") from e
                 if e.code in RETRY_STATUS and attempt < self.max_retries:
                     time.sleep(min(60, 2 ** attempt * 3))
                     continue
-                raise RuntimeError(f"OpenRouter HTTP {e.code}: {e.read()[:300]!r}") from e
+                raise RuntimeError(f"OpenRouter HTTP {e.code}: {detail!r}") from e
             if "error" in data:  # OpenRouter can return 200 with an error body
                 raise RuntimeError(f"OpenRouter error: {data['error']}")
             return SimpleNamespace(content=from_openai_message(data["choices"][0]["message"]))

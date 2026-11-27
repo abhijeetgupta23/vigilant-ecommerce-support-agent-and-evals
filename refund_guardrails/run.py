@@ -21,6 +21,12 @@ from .report import write_report
 from .score import score
 
 CASES_FILE = Path(__file__).with_name("cases.json")
+# Cloud sessions strip ANTHROPIC_API_KEY, so the key can also come from this variable.
+KEY_VARS = ("ANTHROPIC_API_KEY", "REFUND_GUARDRAILS_ANTHROPIC_KEY")
+
+
+def api_key() -> str | None:
+    return next((os.environ[v] for v in KEY_VARS if os.environ.get(v)), None)
 
 
 def load_cases() -> list[dict]:
@@ -31,7 +37,7 @@ class AnthropicLLM:
     def __init__(self, max_tokens: int = 1024):
         import anthropic  # imported here so offline tests don't need it
 
-        self.client = anthropic.Anthropic(max_retries=5)
+        self.client = anthropic.Anthropic(api_key=api_key(), max_retries=5)
         self.max_tokens = max_tokens
 
     def create(self, *, model, system, messages, tools):
@@ -62,8 +68,8 @@ def main(argv: list[str] | None = None) -> Path:
     p.add_argument("--out", default="results")
     a = p.parse_args(argv)
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise SystemExit("Set ANTHROPIC_API_KEY first.")
+    if not api_key():
+        raise SystemExit(f"Set {' or '.join(KEY_VARS)} first.")
     cases = [c for c in load_cases() if not a.only or c["id"] in a.only]
     llm = AnthropicLLM()
     jobs = [(m, c, g, r) for m in a.models for c in cases for g in (False, True) for r in range(a.runs)]

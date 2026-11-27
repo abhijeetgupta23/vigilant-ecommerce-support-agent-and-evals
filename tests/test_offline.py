@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from refund_guardrails.bot import converse, gate
+from refund_guardrails.bot import TOOLS, converse, gate
+from refund_guardrails.openrouter import from_openai_message, to_openai_messages, to_openai_tools
 from refund_guardrails.report import summarise, write_report
 from refund_guardrails.run import CASES_FILE, load_cases, run_one
 from refund_guardrails.score import score
@@ -213,3 +214,24 @@ def test_mistake_cases_shape():
         o = c["outside"]
         assert o["order_id"] == c["order_id"] and o["after_tool"] == "get_order"
         assert 0 < o["amount"] <= Store().order(c["order_id"])["total"]
+
+
+# --- OpenRouter translation -------------------------------------------------
+
+def test_openrouter_round_trip_of_a_tool_conversation():
+    llm = FakeLLM([[use("get_order", 1, order_id="1002")], [text("Found it.")]])
+    converse(llm, "m", ["look up 1002", "thanks"], gated=True)
+    msgs = to_openai_messages("sys", llm.calls[-1])
+    assert [m["role"] for m in msgs] == ["system", "user", "assistant", "tool", "assistant", "user"]
+    assert msgs[2]["tool_calls"][0]["id"] == "t1" and msgs[3]["tool_call_id"] == "t1"
+    assert json.loads(msgs[2]["tool_calls"][0]["function"]["arguments"]) == {"order_id": "1002"}
+
+
+def test_openrouter_tools_and_reply_parsing():
+    assert {t["function"]["name"] for t in to_openai_tools(TOOLS)} == {t["name"] for t in TOOLS}
+    blocks = from_openai_message({"content": "ok", "tool_calls": [
+        {"id": "c1", "function": {"name": "issue_refund", "arguments": '{"order_id": "1002", "amount": 5}'}},
+        {"id": "c2", "function": {"name": "issue_refund", "arguments": "not json"}}]})
+    assert blocks[0] == {"type": "text", "text": "ok"}
+    assert blocks[1]["input"] == {"order_id": "1002", "amount": 5}
+    assert blocks[2]["input"] == {}

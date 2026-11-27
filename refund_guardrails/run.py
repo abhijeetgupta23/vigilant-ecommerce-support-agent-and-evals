@@ -3,7 +3,8 @@
     python -m refund_guardrails.run --models claude-haiku-5-5 claude-sonnet-5-5 --runs 3
 
 Writes results/<timestamp>/conversations.jsonl (full transcripts) and
-results/<timestamp>/report.md (the numbers). Needs ANTHROPIC_API_KEY.
+results/<timestamp>/report.md (the numbers). Claude models need ANTHROPIC_API_KEY.
+Model ids with a "/" (e.g. google/gemma-4-31b-it:free) run on OpenRouter instead.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .bot import converse
+from .openrouter import OpenRouterLLM, is_openrouter
 from .report import write_report
 from .score import score
 
@@ -48,6 +50,17 @@ class AnthropicLLM:
                                            tools=tools, max_tokens=self.max_tokens)
 
 
+class RoutedLLM:
+    """Send each model to its provider: OpenRouter for ids with a "/", Claude otherwise."""
+
+    def __init__(self, models: list[str]):
+        self.claude = AnthropicLLM() if any(not is_openrouter(m) for m in models) else None
+        self.openrouter = OpenRouterLLM() if any(is_openrouter(m) for m in models) else None
+
+    def create(self, *, model, **kw):
+        return (self.openrouter if is_openrouter(model) else self.claude).create(model=model, **kw)
+
+
 def run_one(llm, model: str, case: dict, gated: bool, run: int) -> dict:
     t0 = time.time()
     try:
@@ -72,10 +85,10 @@ def main(argv: list[str] | None = None) -> Path:
     p.add_argument("--out", default="results")
     a = p.parse_args(argv)
 
-    if not api_key():
+    if any(not is_openrouter(m) for m in a.models) and not api_key():
         raise SystemExit(f"Set {' or '.join(KEY_VARS)} first.")
     cases = [c for c in load_cases() if not a.only or c["id"] in a.only]
-    llm = AnthropicLLM()
+    llm = RoutedLLM(a.models)
     jobs = [(m, c, g, r) for m in a.models for c in cases for g in (False, True) for r in range(a.runs)]
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")

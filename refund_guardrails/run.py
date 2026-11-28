@@ -135,6 +135,29 @@ def build_meta(*, models: list[str], runs: int, n_cases: int, max_tokens: int, s
     }
 
 
+def job_key(row: dict) -> tuple:
+    return (row["model"], row["case_id"], row["design"], row["run"])
+
+
+def latest_rows(rows: list[dict]) -> list[dict]:
+    """One row per job: a scored row if any attempt was scored, else the last error.
+    A resumed folder keeps every attempt in conversations.jsonl; the report uses these."""
+    best: dict = {}
+    for r in rows:
+        k = job_key(r)
+        if k not in best or best[k].get("error") or not r.get("error"):
+            best[k] = r
+    return list(best.values())
+
+
+def order_jobs(models, cases, designs, runs) -> list[tuple]:
+    """Stale cases first, then pressure, then fair refunds; one run of everything before the
+    next run; designs interleaved. A run cut short by a daily limit still covers all designs."""
+    rank = {"stale_info": 0, "legit": 2}
+    cases = sorted(cases, key=lambda c: (rank.get(c["type"], 1), c.get("script") == "yes"))
+    return [(m, c, d, r) for m in models for r in range(runs) for c in cases for d in designs]
+
+
 def main(argv: list[str] | None = None) -> Path:
     p = argparse.ArgumentParser()
     p.add_argument("--models", nargs="+", required=True, help="provider:model_id, e.g. anthropic:<id>")
@@ -146,31 +169,63 @@ def main(argv: list[str] | None = None) -> Path:
     p.add_argument("--scripts", nargs="+", default=list(SCRIPTS), choices=SCRIPTS,
                    help="base scripts, the '-yes' copies, or both (default: both)")
     p.add_argument("--out", default="results")
+    p.add_argument("--resume", help="an earlier results/<timestamp> folder: skip jobs already scored "
+                                    "there, append new attempts, rewrite the report over all of them")
     a = p.parse_args(argv)
 
     cases = [c for c in load_cases(a.scripts) if not a.only or c["id"] in a.only]
     specs = {m: parse_spec(m) for m in a.models}
     llms = {prov: make_llm(prov, a.max_tokens) for prov in {prov for prov, _ in specs.values()}}
-    jobs = [(m, c, d, r) for m in a.models for c in cases for d in a.designs for r in range(a.runs)]
+    jobs = order_jobs(a.models, cases, a.designs, a.runs)
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    out = Path(a.out) / stamp
-    out.mkdir(parents=True, exist_ok=True)
+    old_rows: list[dict] = []
+    old_meta: dict = {}
+    if a.resume:
+        out = Path(a.resume)
+        old_rows = [json.loads(line) for line in (out / "conversations.jsonl").read_text().splitlines()
+                    if line.strip()]
+        old_meta = json.loads((out / "meta.json").read_text()) if (out / "meta.json").exists() else {}
+        done = {job_key(r) for r in old_rows if not r.get("error")}
+        jobs = [j for j in jobs if (j[0], j[1]["id"], j[2], j[3]) not in done]
+    else:
+        out = Path(a.out) / stamp
+        out.mkdir(parents=True, exist_ok=True)
     print(f"{len(jobs)} conversations -> {out}")
+
+    stopped: set[str] = set()  # models that hit a daily limit: skip their remaining jobs
+
+    def job(m, c, d, r):
+        if m in stopped:
+            return None
+        row = run_one(llms[specs[m][0]], specs[m][1], c, d, r, label=m)
+        if "daily limit" in (row.get("error") or ""):
+            stopped.add(m)
+        return row
+
     rows = []
-    with ThreadPoolExecutor(max_workers=a.workers) as ex, open(out / "conversations.jsonl", "w") as f:
-        futs = [ex.submit(run_one, llms[specs[m][0]], specs[m][1], c, d, r, label=m) for m, c, d, r in jobs]
+    with ThreadPoolExecutor(max_workers=a.workers) as ex, open(out / "conversations.jsonl", "a") as f:
+        futs = [ex.submit(job, m, c, d, r) for m, c, d, r in jobs]
         for i, fut in enumerate(as_completed(futs), 1):
             row = fut.result()
-            rows.append(row)
-            f.write(json.dumps(row) + "\n")
-            f.flush()
+            if row is not None:
+                rows.append(row)
+                f.write(json.dumps(row) + "\n")
+                f.flush()
             if i % 20 == 0 or i == len(futs):
-                print(f"  {i}/{len(futs)}")
-    meta = build_meta(models=a.models, runs=a.runs, n_cases=len(cases), max_tokens=a.max_tokens,
-                      stamp=stamp, designs=a.designs, scripts=a.scripts)
+                print(f"  {i}/{len(futs)}" + (f"  (daily limit: {sorted(stopped)})" if stopped else ""))
+    if stopped:
+        print(f"Stopped at a daily limit: {sorted(stopped)}. Resume later with --resume {out}")
+    all_rows = latest_rows(old_rows + rows)
+    models = list(dict.fromkeys([*old_meta.get("models", []), *a.models]))
+    meta = build_meta(models=models, runs=a.runs, n_cases=len(cases), max_tokens=a.max_tokens,
+                      stamp=old_meta.get("date_utc", stamp), designs=a.designs, scripts=a.scripts)
+    meta["sessions_utc"] = [*old_meta.get("sessions_utc", []), stamp]
+    if old_meta.get("git_commit") and old_meta["git_commit"] != meta["git_commit"]:
+        meta["git_commits"] = sorted({*old_meta.get("git_commits", [old_meta["git_commit"]]),
+                                      meta["git_commit"]})
     (out / "meta.json").write_text(json.dumps(meta, indent=2))
-    write_report(rows, meta, out / "report.md")
+    write_report(all_rows, meta, out / "report.md")
     print(f"Report: {out / 'report.md'}")
     return out
 

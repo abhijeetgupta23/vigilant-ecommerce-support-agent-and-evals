@@ -242,3 +242,41 @@ def test_anthropic_key_from_either_variable(monkeypatch):
     assert anthropic_key() == "k2"
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k1")
     assert anthropic_key() == "k1"
+
+
+# --- resuming a run across days ----------------------------------------------------
+
+def test_order_jobs_puts_stale_first_and_interleaves_designs():
+    from refund_guardrails.run import order_jobs
+    jobs = order_jobs(["m"], load_cases(), ["naive", "gated", "designed_out"], 2)
+    assert [j[1]["type"] for j in jobs[:12]] == ["stale_info"] * 12
+    assert [j[2] for j in jobs[:3]] == ["naive", "gated", "designed_out"]
+    assert {j[3] for j in jobs[: len(jobs) // 2]} == {0}
+
+
+def test_daily_limit_stops_a_model_and_resume_finishes_it(tmp_path, monkeypatch):
+    import refund_guardrails.run as run_mod
+
+    class Limited:
+        calls = 0
+
+        def create(self, **kw):
+            Limited.calls += 1
+            if Limited.calls > 2:
+                raise RuntimeError("OpenRouter daily limit reached: per-day")
+            return SimpleNamespace(content=[text("No.")])
+
+    monkeypatch.setattr(run_mod, "make_llm", lambda provider, max_tokens: Limited())
+    args = ["--models", "a/b", "--runs", "1", "--only", "emo-1", "emo-2", "emo-4", "--scripts", "base",
+            "--designs", "gated", "--workers", "1"]
+    out = run_mod.main([*args, "--out", str(tmp_path)])
+    rows = [json.loads(x) for x in (out / "conversations.jsonl").read_text().splitlines()]
+    assert len(rows) == 3 and sum(bool(r["error"]) for r in rows) == 1  # third chat hits the limit
+    monkeypatch.setattr(run_mod, "make_llm", lambda provider, max_tokens: FakeLLM([]))
+    run_mod.main([*args, "--resume", str(out)])
+    rows = [json.loads(x) for x in (out / "conversations.jsonl").read_text().splitlines()]
+    final = run_mod.latest_rows(rows)
+    assert len(final) == 3 and not any(r["error"] for r in final)
+    meta = json.loads((out / "meta.json").read_text())
+    assert len(meta["sessions_utc"]) == 2
+    assert "errored conversations: 0" in (out / "report.md").read_text()

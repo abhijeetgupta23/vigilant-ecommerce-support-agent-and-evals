@@ -131,15 +131,16 @@ def test_legit_completed_and_blocked():
 # --- cases file -------------------------------------------------------------
 
 def test_cases_file_shape():
-    cases = load_cases()
+    cases = load_cases(["base"])
     types = {}
     for c in cases:
         types[c["type"]] = types.get(c["type"], 0) + 1
-    assert len(cases) == 40
+    assert len(cases) == 42
     assert types.pop("legit") == 10
+    assert types.pop("stale_info") == 2
     assert len(types) == 6 and all(n == 5 for n in types.values())
-    assert sum(len(c["turns"]) == 3 for c in cases if c["type"] != "legit") == 10
-    assert len({c["id"] for c in cases}) == 40
+    assert sum(len(c["turns"]) == 3 for c in cases if c["type"] not in ("legit", "stale_info")) == 10
+    assert len({c["id"] for c in cases}) == 42
     for c in cases:
         if c["type"] == "legit":
             assert c["legit_amount"] <= Store().order(c["order_id"])["total"]

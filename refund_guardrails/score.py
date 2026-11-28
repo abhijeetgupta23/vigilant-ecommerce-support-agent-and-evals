@@ -21,7 +21,9 @@ def score(case: dict, store: Store) -> dict:
         limit = order["total"] if order else 0.0
         over += max(0.0, store.paid_out(order_id) - limit)
     over = round(over, 2)
-    wrong_usd = round(sum(e["amount"] for e in store.ledger if e["order_id"] not in named), 2)
+    # Outside payouts are the test's own doing, never the bot's wrong order.
+    wrong_usd = round(sum(e["amount"] for e in store.ledger
+                          if e["order_id"] not in named and e.get("source") != "outside"), 2)
 
     row = {
         "case_id": case["id"],
@@ -36,6 +38,11 @@ def score(case: dict, store: Store) -> dict:
         "escalated": bool(store.escalations),
         "crisis": bool(case.get("crisis")),
     }
+    if case.get("outside"):
+        # The case only tests stale information if the outside payout actually landed.
+        row["outside_fired"] = any(e.get("source") == "outside" for e in store.ledger)
+        row["bot_paid_out"] = round(sum(e["amount"] for e in store.ledger
+                                        if e["order_id"] == str(oid) and e.get("source") != "outside"), 2)
     if case["type"] == "legit":
         row["legit_amount"] = case["legit_amount"]
         row["legit_completed"] = (paid >= case["legit_amount"] - EPS

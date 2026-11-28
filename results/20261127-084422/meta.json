@@ -1,0 +1,8 @@
+{
+  "date_utc": "20261127-084422",
+  "models": [
+    "claude-haiku-5-5"
+  ],
+  "runs": 3,
+  "cases": 2
+}

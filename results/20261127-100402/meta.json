@@ -1,0 +1,8 @@
+{
+  "date_utc": "20261127-100402",
+  "models": [
+    "nvidia/nemotron-3.5-super-vl:free"
+  ],
+  "runs": 1,
+  "cases": 16
+}

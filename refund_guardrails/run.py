@@ -3,7 +3,11 @@
     python -m refund_guardrails.run --models anthropic:<id> openai_compat:<id> \
         --designs naive gated designed_out --runs 3
 
-A model is written as provider:model_id (see llm.py); a bare id means anthropic.
+A model is written as provider:model_id (see llm.py). A bare id with a "/" in it
+(e.g. nvidia/nemotron-3.5-super-vl:free) runs on OpenRouter; any other bare id means anthropic.
+
+Cases: cases.json (pressure and fair refunds), mistake_cases.json (stale information), and a
+"-yes" copy of every pressure and stale case that ends with the customer saying yes.
 Writes results/<timestamp>/conversations.jsonl (full transcripts),
 results/<timestamp>/report.md (the numbers) and meta.json (the settings).
 """
@@ -26,10 +30,28 @@ from .score import score
 from .store import Store
 
 CASES_FILE = Path(__file__).with_name("cases.json")
+# Honest customer, bot slips because what it read went stale. Reported apart from pressure cases.
+MISTAKE_CASES_FILE = Path(__file__).with_name("mistake_cases.json")
+SCRIPTS = ("base", "yes")
+YES_TURN = "Yes, go ahead."
 
 
-def load_cases() -> list[dict]:
-    return json.loads(CASES_FILE.read_text())
+def with_yes_turn(case: dict) -> dict:
+    """A copy of the case whose customer accepts whatever the bot offered last."""
+    return {**case, "id": f"{case['id']}-yes", "base_id": case["id"], "script": "yes",
+            "turns": [*case["turns"], YES_TURN]}
+
+
+def load_cases(scripts: tuple[str, ...] | list[str] = SCRIPTS) -> list[dict]:
+    """Every case to run. "base" is the scripts as written (comparable with the 27 Nov runs);
+    "yes" adds a final "Yes, go ahead." turn to each pressure and stale case, so a bot that
+    offers something and waits for consent is scored on what it pays after the yes."""
+    base = [{**c, "script": "base"} for c in
+            json.loads(CASES_FILE.read_text()) + json.loads(MISTAKE_CASES_FILE.read_text())]
+    out = base if "base" in scripts else []
+    if "yes" in scripts:
+        out = out + [with_yes_turn(c) for c in base if c["type"] != "legit"]
+    return out
 
 
 def simulate_warehouse_receipt(store: Store) -> int:
@@ -37,13 +59,21 @@ def simulate_warehouse_receipt(store: Store) -> int:
 
     This is the only way money reaches the ledger in the designed_out design.
     Returns the number of returns received. Safe to call more than once.
+    The ledger is read again at payment time: if paying would take the order past its total
+    (someone else paid money on it after the return started), the return is marked "held"
+    and nothing is paid. Held returns are not counted as received.
     """
     received = 0
     for r in store.returns:
-        if r["status"] == "open":
-            store.record(r["order_id"], "refund", r["refund_due"])
-            r["status"] = "received"
-            received += 1
+        if r["status"] != "open":
+            continue
+        order = store.order(r["order_id"])
+        if store.paid_out(r["order_id"]) + r["refund_due"] > order["total"] + 1e-9:
+            r["status"] = "held"
+            continue
+        store.record(r["order_id"], "refund", r["refund_due"])
+        r["status"] = "received"
+        received += 1
     return received
 
 
@@ -55,11 +85,16 @@ def run_one(llm, model: str, case: dict, design: str | bool, run: int, label: st
     design = resolve_design(design)
     t0 = time.time()
     try:
-        store, transcript = converse(llm, model, case["turns"], design=design)
+        store, transcript = converse(llm, model, case["turns"], design=design, outside=case.get("outside"))
         simulate_warehouse_receipt(store)
         row = score(case, store)
         row.update(store.usage)
         row["returns"] = store.returns
+        calls = [c for t in transcript for c in t.tool_calls]
+        # A blocked money call (gated) and a rejected return (designed_out) are counted apart.
+        row["gate_blocks"] = sum(c["blocked"] for c in calls if c["name"] != "start_return")
+        row["returns_rejected"] = sum(c["blocked"] for c in calls if c["name"] == "start_return")
+        row["returns_held"] = sum(r["status"] == "held" for r in store.returns)
         row["transcript"] = [t.__dict__ for t in transcript]
         row["error"] = None
     except ToolCallError as exc:
@@ -68,6 +103,7 @@ def run_one(llm, model: str, case: dict, design: str | bool, run: int, label: st
     except Exception as exc:  # noqa: BLE001  keep going; errors are reported, never counted as passes
         row = {"case_id": case["id"], "type": case["type"], "error": f"{type(exc).__name__}: {exc}"}
     row.update({"model": label or model, "design": design, "run": run,
+                "script": case.get("script", "base"), "base_id": case.get("base_id", case["id"]),
                 "seconds": round(time.time() - t0, 2)})
     return row
 
@@ -82,7 +118,7 @@ def _git_commit() -> str | None:
 
 
 def build_meta(*, models: list[str], runs: int, n_cases: int, max_tokens: int, stamp: str,
-               designs: list[str] | None = None) -> dict:
+               designs: list[str] | None = None, scripts: list[str] | None = None) -> dict:
     """Everything needed to tell two runs apart later."""
     return {
         "date_utc": stamp,
@@ -91,6 +127,7 @@ def build_meta(*, models: list[str], runs: int, n_cases: int, max_tokens: int, s
         "designs": list(designs or DESIGNS),
         "runs": runs,
         "cases": n_cases,
+        "scripts": list(scripts or SCRIPTS),
         "temperature": "provider default",
         "max_tokens": max_tokens,
         "system_prompt_sha256": hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()[:12],
@@ -106,10 +143,12 @@ def main(argv: list[str] | None = None) -> Path:
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     p.add_argument("--only", nargs="*", help="case ids to run (default: all)")
+    p.add_argument("--scripts", nargs="+", default=list(SCRIPTS), choices=SCRIPTS,
+                   help="base scripts, the '-yes' copies, or both (default: both)")
     p.add_argument("--out", default="results")
     a = p.parse_args(argv)
 
-    cases = [c for c in load_cases() if not a.only or c["id"] in a.only]
+    cases = [c for c in load_cases(a.scripts) if not a.only or c["id"] in a.only]
     specs = {m: parse_spec(m) for m in a.models}
     llms = {prov: make_llm(prov, a.max_tokens) for prov in {prov for prov, _ in specs.values()}}
     jobs = [(m, c, d, r) for m in a.models for c in cases for d in a.designs for r in range(a.runs)]
@@ -129,7 +168,7 @@ def main(argv: list[str] | None = None) -> Path:
             if i % 20 == 0 or i == len(futs):
                 print(f"  {i}/{len(futs)}")
     meta = build_meta(models=a.models, runs=a.runs, n_cases=len(cases), max_tokens=a.max_tokens,
-                      stamp=stamp, designs=a.designs)
+                      stamp=stamp, designs=a.designs, scripts=a.scripts)
     (out / "meta.json").write_text(json.dumps(meta, indent=2))
     write_report(rows, meta, out / "report.md")
     print(f"Report: {out / 'report.md'}")

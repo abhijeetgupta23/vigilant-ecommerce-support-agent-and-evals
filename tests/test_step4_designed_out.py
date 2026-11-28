@@ -125,7 +125,7 @@ def test_receipt_pays_open_returns_once():
     start_return(s, "1002", "MUG-01", 1)
     assert simulate_warehouse_receipt(s) == 1
     assert simulate_warehouse_receipt(s) == 0
-    assert s.ledger == [{"order_id": "1002", "kind": "refund", "amount": 25.0}]
+    assert s.ledger == [{"order_id": "1002", "kind": "refund", "amount": 25.0, "source": "bot"}]
     assert s.returns[0]["status"] == "received"
 
 

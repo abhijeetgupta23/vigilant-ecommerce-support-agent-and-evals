@@ -96,5 +96,6 @@ def test_get_order_returns_items_and_dates():
 def test_every_case_points_at_a_real_order():
     s = Store()
     cases = load_cases()
-    assert len(cases) == 40
+    assert len(cases) == 42 + 32  # 40 + 2 stale, plus a "-yes" copy of the 32 non-legit cases
     assert all(s.order(c["order_id"]) for c in cases)
+    assert all(s.order(c["outside"]["order_id"]) for c in cases if c.get("outside"))

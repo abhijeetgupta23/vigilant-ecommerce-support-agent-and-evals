@@ -1,21 +1,32 @@
 """Model adapters. The bot loop speaks one shape (Anthropic-style content blocks);
 each adapter translates to and from its provider.
 
-    anthropic:<model_id>       Anthropic Messages API       ANTHROPIC_API_KEY
+    anthropic:<model_id>       Anthropic Messages API       ANTHROPIC_API_KEY or REFUND_GUARDRAILS_ANTHROPIC_KEY
+    openrouter:<model_id>      OpenRouter                   OPENROUTER_API_KEY, or a proxy that adds it
     openai_compat:<model_id>   any OpenAI-compatible host   OPENAI_COMPAT_BASE_URL, OPENAI_COMPAT_API_KEY
 
-A bare model id means anthropic.
+A bare model id with a "/" in it (e.g. nvidia/nemotron-3.5-super-vl:free) means openrouter;
+any other bare id means anthropic.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
-PROVIDERS = ("anthropic", "openai_compat")
+PROVIDERS = ("anthropic", "openrouter", "openai_compat")
 DEFAULT_MAX_TOKENS = 1024
+# Cloud sessions strip ANTHROPIC_API_KEY, so the key can also come from the second variable.
+ANTHROPIC_KEY_VARS = ("ANTHROPIC_API_KEY", "REFUND_GUARDRAILS_ANTHROPIC_KEY")
+
+
+def anthropic_key() -> str | None:
+    return next((os.environ[v] for v in ANTHROPIC_KEY_VARS if os.environ.get(v)), None)
 
 
 class ToolCallError(Exception):
@@ -35,7 +46,7 @@ def parse_spec(spec: str) -> tuple[str, str]:
         if not rest:
             raise ValueError(f"No model id in {spec!r}")
         return head, rest
-    return "anthropic", spec
+    return ("openrouter" if "/" in spec else "anthropic"), spec
 
 
 def _to_dict(obj: Any) -> dict:
@@ -52,7 +63,7 @@ class AnthropicLLM:
     def __init__(self, max_tokens: int = DEFAULT_MAX_TOKENS):
         import anthropic  # imported here so offline tests don't need it
 
-        self.client = anthropic.Anthropic(max_retries=5)
+        self.client = anthropic.Anthropic(api_key=anthropic_key(), max_retries=5)
         self.max_tokens = max_tokens
 
     def create(self, *, model, system, messages, tools):
@@ -146,11 +157,65 @@ class OpenAICompatLLM:
                                "output_tokens": usage.get("completion_tokens") or 0})
 
 
+# --- OpenRouter -------------------------------------------------------------------
+
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+RETRY_STATUS = {408, 429, 500, 502, 503, 504}
+
+
+class OpenRouterLLM:
+    """OpenRouter over plain HTTPS (honours HTTPS_PROXY). Same translation as OpenAICompatLLM.
+
+    The key comes from OPENROUTER_API_KEY; without it a placeholder is sent and a proxy that
+    holds the real key replaces it. No key is ever written in code.
+    """
+
+    def __init__(self, max_tokens: int = DEFAULT_MAX_TOKENS, max_retries: int = 5, timeout: float = 120,
+                 post: Any = None, sleep: Any = time.sleep):
+        self.max_tokens = max_tokens
+        self.max_retries = max_retries
+        self.timeout = timeout
+        self.key = os.environ.get("OPENROUTER_API_KEY") or "proxy-injected"
+        self._post = post or self._http_post
+        self._sleep = sleep
+
+    def _http_post(self, body: dict) -> dict:
+        req = urllib.request.Request(OPENROUTER_URL, data=json.dumps(body).encode(), method="POST",
+                                     headers={"Authorization": f"Bearer {self.key}",
+                                              "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            return json.loads(r.read())
+
+    def create(self, *, model, system, messages, tools):
+        body = {"model": model, "messages": to_openai_messages(system, messages),
+                "tools": to_openai_tools(tools), "max_tokens": self.max_tokens}
+        for attempt in range(self.max_retries + 1):
+            try:
+                data = self._post(body)
+            except urllib.error.HTTPError as e:
+                detail = e.read()[:300]
+                if b"per-day" in detail or b"per day" in detail:  # daily free quota: retrying won't help
+                    raise RuntimeError(f"OpenRouter daily limit reached: {detail!r}") from e
+                if e.code in RETRY_STATUS and attempt < self.max_retries:
+                    self._sleep(min(60, 2 ** attempt * 3))
+                    continue
+                raise RuntimeError(f"OpenRouter HTTP {e.code}: {detail!r}") from e
+            if "error" in data:  # OpenRouter can answer 200 with an error body
+                raise RuntimeError(f"OpenRouter error: {data['error']}")
+            usage = data.get("usage") or {}
+            return Response(content=from_openai_message(data["choices"][0]["message"]),
+                            usage={"input_tokens": usage.get("prompt_tokens") or 0,
+                                   "output_tokens": usage.get("completion_tokens") or 0})
+        raise RuntimeError("unreachable")
+
+
 def make_llm(provider: str, max_tokens: int = DEFAULT_MAX_TOKENS):
     if provider == "anthropic":
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            raise SystemExit("Set ANTHROPIC_API_KEY first.")
+        if not anthropic_key():
+            raise SystemExit(f"Set {' or '.join(ANTHROPIC_KEY_VARS)} first.")
         return AnthropicLLM(max_tokens)
+    if provider == "openrouter":
+        return OpenRouterLLM(max_tokens=max_tokens)
     if provider == "openai_compat":
         return OpenAICompatLLM(max_tokens=max_tokens)
     raise ValueError(f"Unknown provider {provider!r}")

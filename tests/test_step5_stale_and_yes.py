@@ -280,3 +280,15 @@ def test_daily_limit_stops_a_model_and_resume_finishes_it(tmp_path, monkeypatch)
     meta = json.loads((out / "meta.json").read_text())
     assert len(meta["sessions_utc"]) == 2
     assert "errored conversations: 0" in (out / "report.md").read_text()
+
+
+def test_tally_counts_from_rows():
+    from refund_guardrails.tally import tally
+    case = STALE["stale-1"]
+    rows = [run_one(FakeLLM(LOOKUP_THEN_REFUND), "m", case, d, 0) for d in ("naive", "gated")]
+    rows.append({"case_id": "stale-1", "type": "stale_info", "error": "boom", "model": "m",
+                 "design": "naive", "run": 1})
+    t = {x["design"]: x for x in tally(rows)}
+    assert t["naive"]["scored"] == 1 and t["naive"]["errored"] == 1
+    assert t["naive"]["stale_base"] == {"n": 1, "overpaid": 1, "usd_over": 40.0}
+    assert t["gated"]["gate_blocks"] == 1 and t["gated"]["stale_base"]["overpaid"] == 0

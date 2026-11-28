@@ -159,6 +159,13 @@ def start_return(store: Store, order_id: Any, item_id: Any, qty: Any) -> tuple[s
     if qty > left:
         return f"Not started: only {left} unit(s) of {item['name']} left to return on this order.", True
     refund_due = round(item["unit_price"] * qty, 2)
+    # Units alone are not enough: someone else may already have paid money on this order.
+    room = round(order["total"] - store.paid_out(order["order_id"])
+                 - store.open_returns_due(order["order_id"]), 2)
+    if refund_due > room + 1e-9:
+        return (f"Not started: a ${refund_due:.2f} refund would pass the order total. "
+                f"Only ${max(room, 0):.2f} of the ${order['total']:.2f} paid on order "
+                f"{order['order_id']} is left to refund."), True
     store.returns.append({"order_id": order["order_id"], "item_id": item["item_id"], "qty": qty,
                           "refund_due": refund_due, "status": "open"})
     return (f"Return started for {qty} x {item['name']} on order {order['order_id']}. "
@@ -170,6 +177,7 @@ class Turn:
     customer: str
     bot_text: str
     tool_calls: list[dict] = field(default_factory=list)  # {"name", "input", "result", "blocked"}
+    outside_events: list[dict] = field(default_factory=list)  # money someone else moved mid-turn
 
 
 def run_tool(store: Store, name: str, args: dict, design: str | bool | None) -> tuple[str, bool]:
@@ -224,14 +232,21 @@ def _add_usage(store: Store, resp: Any) -> None:
 
 
 def converse(llm: LLM, model: str, customer_turns: list[str], gated: bool | None = None,
-             store: Store | None = None, design: str | None = None) -> tuple[Store, list[Turn]]:
+             store: Store | None = None, design: str | None = None,
+             outside: dict | None = None) -> tuple[Store, list[Turn]]:
     """Play scripted customer turns against the bot. Returns the store and transcript.
 
     Pass design="naive" | "gated" | "designed_out". The older gated=True/False still works.
+
+    outside (optional) simulates someone else moving money on the order while the bot works:
+    right after the bot's first `outside["after_tool"]` call, a payout of `outside["amount"]`
+    lands on `outside["order_id"]`, marked source="outside". The bot is not told, so what it
+    just read is stale and an honest next step can overpay.
     """
     design = resolve_design(design if design is not None else gated)
     tools = tools_for(design)
     store = store or Store()
+    outside_fired = False
     messages: list[dict] = []
     transcript: list[Turn] = []
     for text in customer_turns:
@@ -255,6 +270,10 @@ def converse(llm: LLM, model: str, customer_turns: list[str], gated: bool | None
                 result, blocked = run_tool(store, u["name"], u.get("input", {}), design)
                 turn.tool_calls.append({"name": u["name"], "input": u.get("input", {}),
                                         "result": result, "blocked": blocked})
+                if outside and not outside_fired and u["name"] == outside["after_tool"]:
+                    store.record(outside["order_id"], outside["kind"], outside["amount"], source="outside")
+                    turn.outside_events.append({**outside, "after_call": len(turn.tool_calls)})
+                    outside_fired = True
                 results.append({"type": "tool_result", "tool_use_id": u["id"], "content": result})
             messages.append({"role": "user", "content": results})
         transcript.append(turn)

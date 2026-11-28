@@ -1,0 +1,8 @@
+{
+  "date_utc": "20261127-095308",
+  "models": [
+    "google/gemma-4-31b-it:free"
+  ],
+  "runs": 1,
+  "cases": 2
+}

@@ -47,7 +47,8 @@ OVERPAY = [{"role": "assistant", "content": None,
     ("anthropic:claude-x", ("anthropic", "claude-x")),
     ("claude-x", ("anthropic", "claude-x")),
     ("openai_compat:qwen/qwen3:free", ("openai_compat", "qwen/qwen3:free")),
-    ("meta/llama:free", ("anthropic", "meta/llama:free")),  # unknown prefix: treated as a bare id
+    ("meta/llama:free", ("openrouter", "meta/llama:free")),  # unknown prefix + "/": OpenRouter
+    ("openrouter:nvidia/x:free", ("openrouter", "nvidia/x:free")),
 ])
 def test_parse_spec(spec, expected):
     assert parse_spec(spec) == expected
